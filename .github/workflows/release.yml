@@ -29,7 +29,7 @@ jobs:
 
       - name: Build release (GUI + CLI)
         run: |
-          cmake --preset release -DBUILD_GUI=ON
+          cmake -Bbuild/release -DCMAKE_BUILD_TYPE=Release -DBUILD_GUI=ON
           cmake --build build/release --target routewave routewave_cli -j$(nproc)
 
       - name: Package tarball
@@ -100,7 +100,8 @@ jobs:
           cmake -Bbuild/win64 \
             -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64.cmake \
             -DCMAKE_BUILD_TYPE=Release \
-            -DBUILD_GUI=OFF
+            -DBUILD_GUI=OFF \
+            -Wno-dev
           cmake --build build/win64 --target routewave_cli -j$(nproc)
 
       - name: Package
