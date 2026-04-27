@@ -1,0 +1,112 @@
+name: README drift check
+
+on:
+  pull_request:
+    paths:
+      - "README.md"
+      - ".github/workflows/readme-drift.yml"
+  push:
+    branches: [main]
+    paths:
+      - "README.md"
+      - ".github/workflows/readme-drift.yml"
+  schedule:
+    # Weekly Monday 09:00 UTC — catches "released a new asset class without
+    # updating README" (the macOS DMG case from LT-P3.87).
+    - cron: "0 9 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    name: Detect README drift
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve latest release
+        id: rel
+        run: |
+          TAG=$(gh release view --repo "$GITHUB_REPOSITORY" --json tagName -q .tagName)
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "Latest release: $TAG"
+
+      - name: License claim matches LICENSE shipped in release
+        env:
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p .drift
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" \
+            --pattern "routewave-*-linux-x86_64.tar.gz" --dir .drift
+          tar -xzf .drift/routewave-*-linux-x86_64.tar.gz -C .drift
+          LIC=$(find .drift -name LICENSE -type f | head -n1)
+          if [ -z "$LIC" ]; then
+            echo "::error::No LICENSE file found in $TAG linux tarball"
+            exit 1
+          fi
+          # Detect license family. Extend the matcher when a new family ships.
+          KNOWN=""
+          grep -qE "MIT License"          "$LIC" && KNOWN="MIT"
+          grep -qE "Apache License"       "$LIC" && KNOWN="Apache"
+          grep -qE "GNU General Public"   "$LIC" && KNOWN="GPL"
+          grep -qE "Proprietary Freeware" "$LIC" && KNOWN="Proprietary Freeware"
+          if [ -z "$KNOWN" ]; then
+            echo "::error::LICENSE file did not match any known family — extend the matcher in this workflow"
+            head -3 "$LIC"
+            exit 1
+          fi
+          echo "License family in $TAG: $KNOWN"
+          if ! grep -q "$KNOWN" README.md; then
+            echo "::error::LICENSE says '$KNOWN' but README.md does not mention it"
+            exit 1
+          fi
+          echo "OK — README license claim matches LICENSE"
+
+      - name: Platform table covers all release assets
+        env:
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          set -euo pipefail
+          ASSETS=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name')
+          echo "Assets in $TAG:"
+          echo "$ASSETS" | sed 's/^/  /'
+          fail=0
+          check() {
+            local pattern="$1" token="$2"
+            if echo "$ASSETS" | grep -q "$pattern"; then
+              if grep -qi "$token" README.md; then
+                echo "  OK   — '$pattern' shipped, README mentions '$token'"
+              else
+                echo "::error::Asset matching '$pattern' is shipped but README does not mention '$token'"
+                fail=1
+              fi
+            fi
+          }
+          check "linux-x86_64\.tar\.gz" "Linux"
+          check "x86_64\.AppImage"      "AppImage"
+          check "macOS"                 "macOS"
+          check "windows-x86_64\.zip"   "Windows"
+          [ "$fail" -eq 0 ]
+
+      - name: Verification artifacts are documented
+        env:
+          TAG: ${{ steps.rel.outputs.tag }}
+        run: |
+          set -euo pipefail
+          ASSETS=$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets -q '.assets[].name')
+          fail=0
+          if echo "$ASSETS" | grep -q "SHA256SUMS"; then
+            grep -q "SHA256SUMS\|sha256sum" README.md \
+              || { echo "::error::Release ships SHA256SUMS but README does not document checksum verification"; fail=1; }
+          fi
+          if echo "$ASSETS" | grep -q "PUBLIC_KEY\.asc\|\.asc$"; then
+            grep -qi "gpg\|signature" README.md \
+              || { echo "::error::Release ships GPG signatures but README does not document signature verification"; fail=1; }
+          fi
+          [ "$fail" -eq 0 ] && echo "OK — verification artifacts documented"
